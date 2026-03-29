@@ -5,8 +5,9 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    SharedString, Style, Task, TextAlign, TextRun, Timer, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, actions, div, fill, hsla, point, prelude::*, px, relative, rgb, size,
+    ScrollWheelEvent, SharedString, Style, Task, TextAlign, TextRun, Timer, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, div, fill, hsla, point, prelude::*, px, relative,
+    size,
 };
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,8 +19,12 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
+        SelectUp,
+        SelectDown,
         SelectAll,
         Home,
         End,
@@ -58,6 +63,14 @@ pub struct TextInput {
     text_color: Hsla,
     /// 选中背景色（默认：半透明蓝色 0x3311ff30）
     selection_color: Hsla,
+    /// 最大输入字符数（按 Unicode 字素计算），None 表示不限制
+    max_length: Option<usize>,
+    /// 最大高度（像素），超出后内容可滚动。None 表示无限高度自适应
+    max_height: Option<Pixels>,
+    /// 当前垂直滚动偏移量
+    scroll_offset: Pixels,
+    /// 上一次排版计算出的内容总高度
+    last_content_height: Option<Pixels>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +111,10 @@ impl TextInput {
             cursor_color: hsla(210.0 / 360.0, 1.0, 0.5, 1.0), // 蓝色 #0099ff
             text_color: hsla(0.0, 0.0, 0.969, 1.0), // 浅白色 #f7f7f7
             selection_color: hsla(250.0 / 360.0, 1.0, 0.5, 0.19), // 半透明蓝 #3311ff30
+            max_length: None,
+            max_height: None,
+            scroll_offset: px(0.0),
+            last_content_height: None,
         };
         this.start_blink_task(cx);
         this
@@ -160,6 +177,27 @@ impl TextInput {
         self
     }
 
+    /// 设置最大输入字符数（按 Unicode 字素计算）。超出限制的输入将被截断。
+    ///
+    /// ```ignore
+    /// TextInput::new(cx).max_length(100) // 最多输入100个字符
+    /// ```
+    pub fn max_length(mut self, len: usize) -> Self {
+        self.max_length = Some(len);
+        self
+    }
+
+    /// 设置输入框最大高度（像素）。内容超出后可滚动。
+    /// 不设置时输入框高度随内容自适应增长。
+    ///
+    /// ```ignore
+    /// TextInput::new(cx).max_height(px(200.0)) // 最大高度200px
+    /// ```
+    pub fn max_height(mut self, height: Pixels) -> Self {
+        self.max_height = Some(height);
+        self
+    }
+
     /// 读取当前输入内容。
     pub fn value(&self) -> SharedString {
         self.content.clone()
@@ -197,6 +235,82 @@ impl TextInput {
         self.start_blink_task(cx);
     }
 
+    /// 根据 max_length 限制截断输入文本。
+    /// 计算替换后剩余可容纳的字素数量，截断超出部分。
+    fn clamp_input(&self, new_text: &str, replace_range: &Range<usize>) -> String {
+        let Some(max_len) = self.max_length else {
+            return new_text.to_string();
+        };
+        // 计算替换后保留的文本字素数
+        let before = self.content[..replace_range.start].graphemes(true).count();
+        let after = self.content[replace_range.end..].graphemes(true).count();
+        let existing = before + after;
+        if existing >= max_len {
+            return String::new();
+        }
+        let allowed = max_len - existing;
+        let new_graphemes: String = new_text.graphemes(true).take(allowed).collect();
+        new_graphemes
+    }
+
+    /// 处理鼠标滚轮事件，更新滚动偏移。
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 只在有 max_height 限制时才滚动
+        let Some(max_height) = self.max_height else {
+            return;
+        };
+        let content_height = self.last_content_height.unwrap_or(px(0.0));
+        if content_height <= max_height {
+            return;
+        }
+        let line_height = window.line_height();
+        let delta = event.delta.pixel_delta(line_height);
+        let new_offset = self.scroll_offset - delta.y;
+        let max_scroll = content_height - max_height;
+        self.scroll_offset = new_offset.max(px(0.0)).min(max_scroll);
+        cx.notify();
+    }
+
+    /// 确保光标在可视区域内（自动滚动）。
+    fn scroll_to_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(max_height) = self.max_height else {
+            self.scroll_offset = px(0.0);
+            return;
+        };
+        let (Some(line_starts), Some(line_offsets), Some(lines), Some(line_height)) = (
+            self.last_line_starts.as_ref(),
+            self.last_line_offsets.as_ref(),
+            self.last_layout.as_ref(),
+            self.last_line_height,
+        ) else {
+            return;
+        };
+        if lines.is_empty() || line_starts.is_empty() || line_offsets.is_empty() {
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let line_index = Self::line_index_for_offset(line_starts, cursor);
+        let line_start = line_starts[line_index];
+        let cursor_pos = lines[line_index]
+            .position_for_index(cursor.saturating_sub(line_start), line_height)
+            .unwrap_or(point(px(0.0), px(0.0)));
+        let cursor_top = line_offsets[line_index] + cursor_pos.y;
+        let cursor_bottom = cursor_top + line_height;
+
+        if cursor_top < self.scroll_offset {
+            self.scroll_offset = cursor_top;
+            cx.notify();
+        } else if cursor_bottom > self.scroll_offset + max_height {
+            self.scroll_offset = cursor_bottom - max_height;
+            cx.notify();
+        }
+    }
+
     /// 向左移动光标。 如果有选区，则移动到选区起始位置。
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
@@ -215,6 +329,20 @@ impl TextInput {
         }
     }
 
+    /// 向上移动光标。移动到上一视觉行的相同 x 位置。
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(offset) = self.offset_for_vertical_move(-1) {
+            self.move_to(offset, cx);
+        }
+    }
+
+    /// 向下移动光标。移动到下一视觉行的相同 x 位置。
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(offset) = self.offset_for_vertical_move(1) {
+            self.move_to(offset, cx);
+        }
+    }
+
     /// 向左选择文本。 如果没有选区，则从光标当前位置开始选择；如果已有选区，则扩展选区到左边界。
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -223,6 +351,20 @@ impl TextInput {
     /// 向右选择文本。 如果没有选区，则从光标当前位置开始选择；如果已有选区，则扩展选区到右边界。
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    /// 向上选择文本。
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(offset) = self.offset_for_vertical_move(-1) {
+            self.select_to(offset, cx);
+        }
+    }
+
+    /// 向下选择文本。
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(offset) = self.offset_for_vertical_move(1) {
+            self.select_to(offset, cx);
+        }
     }
 
     /// 选择所有文本。
@@ -335,6 +477,7 @@ impl TextInput {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.reset_blink(cx);
+        self.scroll_to_cursor(cx);
         cx.notify()
     }
 
@@ -372,7 +515,7 @@ impl TextInput {
             return self.content.len();
         }
 
-        let y = position.y - bounds.top();
+        let y = position.y - bounds.top() + self.scroll_offset;
         let line_index = line_offsets
             .iter()
             .enumerate()
@@ -469,6 +612,72 @@ impl TextInput {
     fn visual_line_count(line: &WrappedLine) -> usize {
         line.wrap_boundaries().len() + 1
     }
+
+    /// 计算垂直移动后的文本偏移量。
+    /// `direction`: -1 表示上移，1 表示下移。
+    /// 利用布局信息找到光标当前视觉位置，移动到上/下一行同一 x 坐标处。
+    fn offset_for_vertical_move(&self, direction: i32) -> Option<usize> {
+        let lines = self.last_layout.as_ref()?;
+        let line_starts = self.last_line_starts.as_ref()?;
+        let line_offsets = self.last_line_offsets.as_ref()?;
+        let line_height = self.last_line_height?;
+        if lines.is_empty() || line_starts.is_empty() || line_offsets.is_empty() {
+            return None;
+        }
+
+        let cursor = self.cursor_offset();
+        let line_index = Self::line_index_for_offset(line_starts, cursor);
+        let line_start = line_starts[line_index];
+        let cursor_pos = lines[line_index]
+            .position_for_index(cursor.saturating_sub(line_start), line_height)
+            .unwrap_or(point(px(0.0), px(0.0)));
+
+        // 当前光标在全局坐标中的 y 和 x
+        let current_y = line_offsets[line_index] + cursor_pos.y;
+        let current_x = cursor_pos.x;
+
+        // 目标行的 y
+        let target_y = if direction < 0 {
+            // 上移：移到上一行（当前行顶部上方半个行高）
+            if current_y < line_height {
+                return Some(0); // 已在第一行，移到开头
+            }
+            current_y - line_height
+        } else {
+            // 下移：移到下一行
+            let last_line_idx = lines.len() - 1;
+            let last_line_bottom = line_offsets[last_line_idx]
+                + line_height * Self::visual_line_count(&lines[last_line_idx]) as f32;
+            let next_y = current_y + line_height;
+            if next_y >= last_line_bottom {
+                return Some(self.content.len()); // 已在最后一行，移到末尾
+            }
+            next_y
+        };
+
+        // 找到目标 y 所在的逻辑行
+        let target_line_index = line_offsets
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(ix, offset)| {
+                if target_y >= *offset {
+                    Some(ix)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        let target_line_start = line_starts[target_line_index];
+        let local_y = target_y - line_offsets[target_line_index];
+
+        let local_index = lines[target_line_index]
+            .closest_index_for_position(point(current_x, local_y), line_height)
+            .unwrap_or_else(|index| index);
+
+        Some((target_line_start + local_index).min(self.content.len()))
+    }
 }
 
 pub type Textarea = TextInput;
@@ -495,8 +704,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-enter", InsertNewline, None),
         KeyBinding::new("left", Left, None),
         KeyBinding::new("right", Right, None),
+        KeyBinding::new("up", Up, None),
+        KeyBinding::new("down", Down, None),
         KeyBinding::new("shift-left", SelectLeft, None),
         KeyBinding::new("shift-right", SelectRight, None),
+        KeyBinding::new("shift-up", SelectUp, None),
+        KeyBinding::new("shift-down", SelectDown, None),
         KeyBinding::new("cmd-a", SelectAll, None),
         KeyBinding::new("cmd-v", Paste, None),
         KeyBinding::new("cmd-c", Copy, None),
@@ -571,12 +784,15 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
+        let new_text = self.clamp_input(new_text, &range);
+
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         self.reset_blink(cx);
+        self.scroll_to_cursor(cx);
         cx.notify();
     }
 
@@ -594,8 +810,10 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
+        let new_text = self.clamp_input(new_text, &range);
+
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
                 .into();
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
@@ -609,6 +827,7 @@ impl EntityInputHandler for TextInput {
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.reset_blink(cx);
+        self.scroll_to_cursor(cx);
         cx.notify();
     }
 
@@ -675,6 +894,8 @@ struct PrepaintState {
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
     cursor_visible: bool,
+    scroll_offset: Pixels,
+    content_height: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -724,6 +945,7 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let cursor_visible = input.cursor_visible;
+        let scroll_offset = input.scroll_offset;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let wrap_width = Some(bounds.size.width);
@@ -827,6 +1049,9 @@ impl Element for TextElement {
             accumulated_y += line_height * TextInput::visual_line_count(line) as f32;
         }
 
+        // 计算内容总高度
+        let content_height = accumulated_y;
+
         let mut selections = Vec::new();
 
         let cursor = if selected_range.is_empty() {
@@ -835,7 +1060,7 @@ impl Element for TextElement {
             let cursor_pos = lines[line_index]
                 .position_for_index(cursor.saturating_sub(line_start), line_height)
                 .unwrap_or(point(px(0.0), px(0.0)));
-            let top = bounds.top() + line_offsets[line_index] + cursor_pos.y;
+            let top = bounds.top() + line_offsets[line_index] + cursor_pos.y - scroll_offset;
 
             Some(fill(
                 Bounds::new(
@@ -867,7 +1092,7 @@ impl Element for TextElement {
                     .position_for_index(local_end, line_height)
                     .unwrap_or(point(px(0.0), start_pos.y));
 
-                let top_base = bounds.top() + line_offsets[line_index];
+                let top_base = bounds.top() + line_offsets[line_index] - scroll_offset;
                 if (end_pos.y - start_pos.y).abs() < px(0.5) {
                     selections.push(fill(
                         Bounds::from_corners(
@@ -925,6 +1150,8 @@ impl Element for TextElement {
             cursor,
             selections,
             cursor_visible,
+            scroll_offset,
+            content_height,
         }
     }
 
@@ -949,10 +1176,11 @@ impl Element for TextElement {
         }
 
         let line_height = window.line_height();
+        let scroll_offset = prepaint.scroll_offset;
         for (line_index, line) in prepaint.lines.iter().enumerate() {
             let origin = point(
                 bounds.left(),
-                bounds.top() + prepaint.line_offsets[line_index],
+                bounds.top() + prepaint.line_offsets[line_index] - scroll_offset,
             );
             let line_bounds = Bounds::new(
                 origin,
@@ -981,19 +1209,54 @@ impl Element for TextElement {
         let lines = std::mem::take(&mut prepaint.lines);
         let line_starts = std::mem::take(&mut prepaint.line_starts);
         let line_offsets = std::mem::take(&mut prepaint.line_offsets);
+        let content_height = prepaint.content_height;
 
-        self.input.update(cx, |input, _cx| {
+        self.input.update(cx, |input, cx| {
+            let height_changed = input.last_content_height != Some(content_height);
             input.last_layout = Some(lines);
             input.last_line_starts = Some(line_starts);
             input.last_line_offsets = Some(line_offsets);
             input.last_line_height = Some(line_height);
             input.last_bounds = Some(bounds);
+            input.last_content_height = Some(content_height);
+            if height_changed {
+                cx.notify();
+            }
         });
     }
 }
 
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 计算内容区高度：padding_y(8px) * 2 + 内容高度，最低一行高度
+        let padding_y = px(8.0);
+        let min_height = px(20.0) + padding_y * 2.0; // 至少一行
+        let content_height = self.last_content_height.unwrap_or(px(20.0)) + padding_y * 2.0;
+        let container_height = content_height.max(min_height);
+
+        // 如果设置了 max_height，限制高度并启用滚动
+        let final_height = if let Some(max_h) = self.max_height {
+            container_height.min(max_h)
+        } else {
+            container_height
+        };
+
+        let needs_scroll = self.max_height.is_some();
+
+        let mut container = div()
+            .h(final_height)
+            .w_full()
+            .px(px(10.0))
+            .py(padding_y)
+            .rounded(px(8.0))
+            .bg(self.bg_color)
+            .overflow_y_hidden()
+            .child(TextElement { input: cx.entity() });
+
+        if needs_scroll {
+            container = container.on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
+        }
+
         div()
             .flex()
             .w_full()
@@ -1006,8 +1269,12 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -1019,19 +1286,9 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0x1b1b1b))
             .line_height(px(20.0))
             .text_size(px(14.0))
-            .child(
-                div()
-                    .h(px(104.0))
-                    .w_full()
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(self.bg_color)
-                    .child(TextElement { input: cx.entity() }),
-            )
+            .child(container)
     }
 }
 

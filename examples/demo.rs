@@ -11,6 +11,8 @@ impl DemoView {
         let textarea = cx.new(|cx| {
             TextInput::new(cx)
                 .placeholder("请输入内容...")
+                .max_length(500)
+                .max_height(px(300.0))
                 .bg_color(hsla(0.0, 0.0, 0.137, 1.0))
                 .cursor_color(hsla(210.0 / 360.0, 1.0, 0.5, 1.0))
                 .text_color(hsla(0.0, 0.0, 0.969, 1.0))
