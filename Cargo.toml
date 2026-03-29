@@ -1,0 +1,18 @@
+[package]
+name = "gpui-editor"
+version = "0.1.0"
+edition = "2021"
+description = "A multi-line textarea component built with gpui"
+license = "MIT"
+
+[dependencies]
+gpui = "0.2.2"
+unicode-segmentation = "1.11"
+smallvec = "1.13"
+log = "0.4"
+
+[dev-dependencies]
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
