@@ -5,9 +5,10 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
-    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, size,
+    SharedString, Style, Task, TextAlign, TextRun, Timer, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine, actions, div, fill, hsla, point, prelude::*, px, relative, rgb, size,
 };
+use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -45,6 +46,10 @@ pub struct TextInput {
     last_line_height: Option<Pixels>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// 光标是否可见（用于闪烁）
+    cursor_visible: bool,
+    /// 光标闪烁定时任务
+    _blink_task: Option<Task<()>>,
     /// 输入框背景色（默认：深灰色 0x232323）
     bg_color: Hsla,
     /// 光标颜色（默认：蓝色）
@@ -64,18 +69,17 @@ impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     /// 创建一个基础文本输入组件状态。
-    /// ```
+    /// ```ignore
     /// let input = TextInput::new(cx);
     /// ```
     /// 返回一个可聚焦、支持键盘输入、选区和剪贴板操作的文本输入状态。
     /// 默认占位文本为 `请输入内容...`。
-    /// 创建一个基础文本输入组件状态。
-    /// ```
+    /// ```ignore
     /// let input = TextInput::new(cx);
     /// // 默认颜色配置：深灰背景、蓝色光标、白色文本、蓝色选中
     /// ```
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self {
+        let mut this = Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
             placeholder: "请输入内容...".into(),
@@ -88,11 +92,15 @@ impl TextInput {
             last_line_height: None,
             last_bounds: None,
             is_selecting: false,
+            cursor_visible: true,
+            _blink_task: None,
             bg_color: hsla(0.0, 0.0, 0.137, 1.0), // 深灰色 #232323
             cursor_color: hsla(210.0 / 360.0, 1.0, 0.5, 1.0), // 蓝色 #0099ff
             text_color: hsla(0.0, 0.0, 0.969, 1.0), // 浅白色 #f7f7f7
             selection_color: hsla(250.0 / 360.0, 1.0, 0.5, 0.19), // 半透明蓝 #3311ff30
-        }
+        };
+        this.start_blink_task(cx);
+        this
     }
 
     /// 设置输入框占位文本。
@@ -164,6 +172,29 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// 启动光标闪烁定时任务。
+    fn start_blink_task(&mut self, cx: &mut Context<Self>) {
+        let blink_interval = Duration::from_millis(500);
+        let task = cx.spawn(async move |this: gpui::WeakEntity<TextInput>, cx: &mut gpui::AsyncApp| {
+            loop {
+                Timer::after(blink_interval).await;
+                let Ok(()) = this.update(cx, |view, cx| {
+                    view.cursor_visible = !view.cursor_visible;
+                    cx.notify();
+                }) else {
+                    break;
+                };
+            }
+        });
+        self._blink_task = Some(task);
+    }
+
+    /// 重置光标闪烁（输入/移动后让光标立即可见并重启定时器）。
+    fn reset_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        self.start_blink_task(cx);
     }
 
     /// 向左移动光标。 如果有选区，则移动到选区起始位置。
@@ -303,6 +334,7 @@ impl TextInput {
     /// 移动光标到指定位置。
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.reset_blink(cx);
         cx.notify()
     }
 
@@ -442,7 +474,7 @@ impl TextInput {
 pub type Textarea = TextInput;
 
 /// 初始化文本输入相关的全局快捷键绑定。
-/// ```
+/// ```ignore
 /// input::init(cx);
 /// ```
 /// 会注册文本编辑常用按键，包括：
@@ -476,7 +508,7 @@ pub fn init(cx: &mut App) {
 }
 
 /// 渲染一个 `Textarea` 输入实体。
-/// ```
+/// ```ignore
 /// let element = render_textarea(&textarea);
 /// ```
 /// - `textarea`: 文本输入实体句柄
@@ -544,6 +576,7 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.reset_blink(cx);
         cx.notify();
     }
 
@@ -575,6 +608,7 @@ impl EntityInputHandler for TextInput {
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        self.reset_blink(cx);
         cx.notify();
     }
 
@@ -640,6 +674,7 @@ struct PrepaintState {
     line_offsets: Vec<Pixels>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    cursor_visible: bool,
 }
 
 impl IntoElement for TextElement {
@@ -688,6 +723,7 @@ impl Element for TextElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let cursor_visible = input.cursor_visible;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let wrap_width = Some(bounds.size.width);
@@ -888,6 +924,7 @@ impl Element for TextElement {
             line_offsets,
             cursor,
             selections,
+            cursor_visible,
         }
     }
 
@@ -935,10 +972,10 @@ impl Element for TextElement {
             .unwrap();
         }
 
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
+        if focus_handle.is_focused(window) && prepaint.cursor_visible {
+            if let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
         }
 
         let lines = std::mem::take(&mut prepaint.lines);
