@@ -1,732 +1,1005 @@
-/// Multi-line textarea component built with gpui.
-///
-/// Implements a full-featured HTML-like textarea supporting:
-/// - Multi-line text editing
-/// - Keyboard shortcuts (Home, End, Ctrl+A, Ctrl+C/V/X, arrows, etc.)
-/// - Mouse click to position cursor, click-drag to select
-/// - Custom cursor, selection, background, and text colors
-/// - Placeholder text
+use std::cmp::{max, min};
+use std::ops::Range;
+
 use gpui::{
-    canvas, div, fill, point, px, size, App, Bounds, ClipboardItem, Context, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
-    SharedString, Size, Styled, Window,
+    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, size,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
-use crate::buffer::{Position, TextBuffer, TextRange};
-use crate::cursor::Cursor;
-use crate::style::TextareaStyle;
+actions!(
+    text_input,
+    [
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Home,
+        End,
+        ShowCharacterPalette,
+        Submit,
+        InsertNewline,
+        Paste,
+        Cut,
+        Copy,
+        Quit,
+    ]
+);
 
-/// Events emitted by the textarea.
-#[derive(Debug, Clone)]
-pub enum TextareaEvent {
-    /// Text content changed.
-    Changed(String),
-}
-
-/// Multi-line textarea component.
-pub struct Textarea {
-    /// The text buffer.
-    buffer: TextBuffer,
-    /// Cursor / selection state.
-    cursor: Cursor,
-    /// Visual style.
-    style: TextareaStyle,
-    /// Focus handle for keyboard events.
+pub struct TextInput {
     focus_handle: FocusHandle,
-    /// Whether the mouse is currently pressed (for drag-to-select).
-    is_dragging: bool,
-    /// Placeholder text shown when buffer is empty.
-    placeholder: String,
-    /// Scroll offset (vertical, in pixels).
-    scroll_offset_y: f32,
-    /// Scroll offset (horizontal, in pixels).
-    scroll_offset_x: f32,
-    /// Cached content bounds from last render (for hit-testing).
-    content_bounds: Option<Bounds<Pixels>>,
-    /// Whether the textarea is read-only.
-    read_only: bool,
+    content: SharedString,
+    placeholder: SharedString,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+    marked_range: Option<Range<usize>>,
+    last_layout: Option<Vec<WrappedLine>>,
+    last_line_starts: Option<Vec<usize>>,
+    last_line_offsets: Option<Vec<Pixels>>,
+    last_line_height: Option<Pixels>,
+    last_bounds: Option<Bounds<Pixels>>,
+    is_selecting: bool,
+    /// 输入框背景色（默认：深灰色 0x232323）
+    bg_color: Hsla,
+    /// 光标颜色（默认：蓝色）
+    cursor_color: Hsla,
+    /// 文本颜色（默认：白色）
+    text_color: Hsla,
+    /// 选中背景色（默认：半透明蓝色 0x3311ff30）
+    selection_color: Hsla,
 }
 
-impl EventEmitter<TextareaEvent> for Textarea {}
+#[derive(Clone, Debug)]
+pub enum TextInputEvent {
+    Submit,
+}
 
-impl Textarea {
-    /// Create a new textarea.
+impl EventEmitter<TextInputEvent> for TextInput {}
+
+impl TextInput {
+    /// 创建一个基础文本输入组件状态。
+    /// ```
+    /// let input = TextInput::new(cx);
+    /// ```
+    /// 返回一个可聚焦、支持键盘输入、选区和剪贴板操作的文本输入状态。
+    /// 默认占位文本为 `请输入内容...`。
+    /// 创建一个基础文本输入组件状态。
+    /// ```
+    /// let input = TextInput::new(cx);
+    /// // 默认颜色配置：深灰背景、蓝色光标、白色文本、蓝色选中
+    /// ```
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            buffer: TextBuffer::new(),
-            cursor: Cursor::new(),
-            style: TextareaStyle::default(),
             focus_handle: cx.focus_handle(),
-            is_dragging: false,
-            placeholder: String::new(),
-            scroll_offset_y: 0.0,
-            scroll_offset_x: 0.0,
-            content_bounds: None,
-            read_only: false,
+            content: "".into(),
+            placeholder: "请输入内容...".into(),
+            selected_range: 0..0,
+            selection_reversed: false,
+            marked_range: None,
+            last_layout: None,
+            last_line_starts: None,
+            last_line_offsets: None,
+            last_line_height: None,
+            last_bounds: None,
+            is_selecting: false,
+            bg_color: hsla(0.0, 0.0, 0.137, 1.0), // 深灰色 #232323
+            cursor_color: hsla(210.0 / 360.0, 1.0, 0.5, 1.0), // 蓝色 #0099ff
+            text_color: hsla(0.0, 0.0, 0.969, 1.0), // 浅白色 #f7f7f7
+            selection_color: hsla(250.0 / 360.0, 1.0, 0.5, 0.19), // 半透明蓝 #3311ff30
         }
     }
 
-    /// Set initial text content.
-    pub fn set_text(&mut self, text: &str) {
-        self.buffer = TextBuffer::from_text(text);
-        self.cursor = Cursor::new();
-        self.scroll_offset_y = 0.0;
-        self.scroll_offset_x = 0.0;
+    /// 设置输入框占位文本。
+    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.placeholder = placeholder.into();
+        self
     }
 
-    /// Get current text content.
-    pub fn text(&self) -> String {
-        self.buffer.text()
+    /// 设置输入框背景色。支持链式调用配置主题。
+    ///
+    /// 深色主题示例:
+    /// ```ignore
+    /// Textarea::new(cx)
+    ///     .bg_color(hsla(0.0, 0.0, 0.137, 1.0))         // 深灰 #232323
+    ///     .cursor_color(hsla(210.0/360.0, 1.0, 0.5, 1.0))   // 蓝 #0099ff
+    ///     .text_color(hsla(0.0, 0.0, 0.969, 1.0))       // 白 #f7f7f7
+    ///     .selection_color(hsla(250.0/360.0, 1.0, 0.5, 0.19)) // 半透明蓝
+    /// ```
+    pub fn bg_color(mut self, color: Hsla) -> Self {
+        self.bg_color = color;
+        self
     }
 
-    /// Set the style.
-    pub fn set_style(&mut self, style: TextareaStyle) {
-        self.style = style;
+    /// 设置光标颜色。
+    ///
+    /// 常用颜色值:
+    /// - 蓝色: hsla(210.0/360.0, 1.0, 0.5, 1.0)
+    /// - 绿色: hsla(120.0/360.0, 1.0, 0.6, 1.0)
+    /// - 橙色: hsla(30.0/360.0, 1.0, 0.5, 1.0)
+    /// - 红色: hsla(0.0, 1.0, 0.5, 1.0)
+    pub fn cursor_color(mut self, color: Hsla) -> Self {
+        self.cursor_color = color;
+        self
     }
 
-    /// Set placeholder text.
-    pub fn set_placeholder(&mut self, text: &str) {
-        self.placeholder = text.to_string();
+    /// 设置文本颜色。
+    ///
+    /// 常用颜色值:
+    /// - 纯白: hsla(0.0, 0.0, 1.0, 1.0)
+    /// - 深灰: hsla(0.0, 0.0, 0.2, 1.0)
+    /// - 浅绿: hsla(120.0/360.0, 0.8, 0.7, 1.0)
+    /// - 黄色: hsla(60.0/360.0, 1.0, 0.5, 1.0)
+    pub fn text_color(mut self, color: Hsla) -> Self {
+        self.text_color = color;
+        self
     }
 
-    /// Set read-only mode.
-    pub fn set_read_only(&mut self, read_only: bool) {
-        self.read_only = read_only;
+    /// 设置文本选中背景颜色。通常应使用带透明度的颜色。
+    ///
+    /// 常用颜色值（建议透明度 0.2-0.4）:
+    /// - 半透明蓝: hsla(250.0/360.0, 1.0, 0.5, 0.19) 默认值
+    /// - 半透明绿: hsla(120.0/360.0, 1.0, 0.4, 0.3)
+    /// - 半透明黄: hsla(60.0/360.0, 1.0, 0.5, 0.25)
+    /// - 半透明紫: hsla(270.0/360.0, 1.0, 0.55, 0.4)
+    pub fn selection_color(mut self, color: Hsla) -> Self {
+        self.selection_color = color;
+        self
     }
 
-    /// Get a reference to the style.
-    pub fn style(&self) -> &TextareaStyle {
-        &self.style
+    /// 读取当前输入内容。
+    pub fn value(&self) -> SharedString {
+        self.content.clone()
     }
 
-    /// Get mutale reference to the style.
-    pub fn style_mut(&mut self) -> &mut TextareaStyle {
-        &mut self.style
+    /// 清空输入框内容并重置光标位置。
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.content = "".into();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
-    /// Get current cursor position.
-    pub fn cursor_position(&self) -> Position {
-        self.cursor.position
-    }
-
-    /// Get current selection range.
-    pub fn selection(&self) -> Option<TextRange> {
-        self.cursor.selection()
-    }
-
-    /// Get the text buffer.
-    pub fn buffer(&self) -> &TextBuffer {
-        &self.buffer
-    }
-
-    // ── Text editing ──────────────────────────────────
-
-    /// Insert text at cursor, replacing selection if any.
-    fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let new_pos = if let Some(sel) = self.cursor.selection() {
-            self.buffer.replace(sel, text)
+    /// 向左移动光标。 如果有选区，则移动到选区起始位置。
+    fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
-            self.buffer.insert(self.cursor.position, text)
-        };
-        self.cursor.set_position(new_pos);
-        cx.emit(TextareaEvent::Changed(self.buffer.text()));
-        cx.notify();
+            self.move_to(self.selected_range.start, cx)
+        }
     }
 
-    /// Delete the character before the cursor (backspace).
-    fn backspace(&mut self, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if self.cursor.has_selection() {
-            let sel = self.cursor.selection().unwrap();
-            let pos = self.buffer.delete(sel);
-            self.cursor.set_position(pos);
+    /// 向右移动光标。 如果有选区，则移动到选区结束位置。
+    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
-            let prev = self.buffer.move_left(self.cursor.position);
-            if prev != self.cursor.position {
-                let range = TextRange::new(prev, self.cursor.position);
-                self.buffer.delete(range);
-                self.cursor.set_position(prev);
-            }
-        }
-        cx.emit(TextareaEvent::Changed(self.buffer.text()));
-        cx.notify();
-    }
-
-    /// Delete the character after the cursor.
-    fn delete_forward(&mut self, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if self.cursor.has_selection() {
-            let sel = self.cursor.selection().unwrap();
-            let pos = self.buffer.delete(sel);
-            self.cursor.set_position(pos);
-        } else {
-            let next = self.buffer.move_right(self.cursor.position);
-            if next != self.cursor.position {
-                let range = TextRange::new(self.cursor.position, next);
-                self.buffer.delete(range);
-            }
-        }
-        cx.emit(TextareaEvent::Changed(self.buffer.text()));
-        cx.notify();
-    }
-
-    /// Delete the word before the cursor.
-    fn delete_word_left(&mut self, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if self.cursor.has_selection() {
-            self.backspace(cx);
-            return;
-        }
-        let word_start = self.buffer.move_word_left(self.cursor.position);
-        if word_start != self.cursor.position {
-            let range = TextRange::new(word_start, self.cursor.position);
-            self.buffer.delete(range);
-            self.cursor.set_position(word_start);
-            cx.emit(TextareaEvent::Changed(self.buffer.text()));
-            cx.notify();
+            self.move_to(self.selected_range.end, cx)
         }
     }
 
-    /// Get selected text.
-    fn selected_text(&self) -> Option<String> {
-        self.cursor
-            .selection()
-            .map(|sel| self.buffer.text_in_range(sel))
+    /// 向左选择文本。 如果没有选区，则从光标当前位置开始选择；如果已有选区，则扩展选区到左边界。
+    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    /// Cut selected text to clipboard.
-    fn cut(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            let sel = self.cursor.selection().unwrap();
-            let pos = self.buffer.delete(sel);
-            self.cursor.set_position(pos);
-            cx.emit(TextareaEvent::Changed(self.buffer.text()));
-            cx.notify();
+    /// 向右选择文本。 如果没有选区，则从光标当前位置开始选择；如果已有选区，则扩展选区到右边界。
+    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    /// 选择所有文本。
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx)
+    }
+
+    /// 移动光标到行首。
+    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    /// 移动光标到行尾。
+    fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    /// 删除光标前的字符。
+    fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.previous_boundary(self.cursor_offset()), cx)
         }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
-    /// Copy selected text to clipboard.
-    fn copy(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+    /// 删除光标后的字符。
+    fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.next_boundary(self.cursor_offset()), cx)
         }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
-    /// Paste from clipboard.
-    fn paste(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
-                self.insert_text(&text, cx);
-            }
-        }
-    }
-
-    /// Select all text.
-    fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.cursor.select_all(&self.buffer);
-        cx.notify();
-    }
-
-    // ── Coordinate mapping ────────────────────────────
-
-    /// Convert a pixel position (relative to content area origin) to a buffer position.
-    fn pixel_to_position(&self, point: Point<Pixels>, content_origin: Point<Pixels>) -> Position {
-        let x = f32::from(point.x - content_origin.x + px(self.scroll_offset_x));
-        let y = f32::from(point.y - content_origin.y + px(self.scroll_offset_y));
-
-        let line = ((y / self.style.line_height).floor() as usize)
-            .min(self.buffer.line_count().saturating_sub(1));
-
-        // Approximate character position from x coordinate.
-        let char_width = self.style.font_size * 0.6; // Approximate monospace width.
-        let col_approx = ((x / char_width).round() as usize).max(0);
-
-        // Snap to actual grapheme boundary.
-        let line_str = self.buffer.line(line);
-        let mut byte_offset = 0;
-        let mut grapheme_count = 0;
-        use unicode_segmentation::UnicodeSegmentation;
-        for grapheme in line_str.graphemes(true) {
-            if grapheme_count >= col_approx {
-                break;
-            }
-            byte_offset += grapheme.len();
-            grapheme_count += 1;
-        }
-
-        self.buffer.clamp_position(Position::new(line, byte_offset))
-    }
-
-    /// Convert a buffer position to pixel coordinates (relative to content area origin).
-    fn position_to_pixel(&self, pos: Position) -> Point<Pixels> {
-        let char_width = self.style.font_size * 0.6;
-        let line_str = self.buffer.line(pos.line);
-
-        use unicode_segmentation::UnicodeSegmentation;
-        let grapheme_count = line_str[..pos.col].graphemes(true).count();
-
-        let x = grapheme_count as f32 * char_width - self.scroll_offset_x;
-        let y = pos.line as f32 * self.style.line_height - self.scroll_offset_y;
-
-        point(px(x), px(y))
-    }
-
-    /// Ensure cursor is visible by adjusting scroll offset.
-    fn ensure_cursor_visible(&mut self, viewport_size: Size<Pixels>) {
-        let cursor_px = self.position_to_pixel(self.cursor.position);
-        let padding = self.style.padding;
-
-        let view_width = f32::from(viewport_size.width) - padding * 2.0;
-        let view_height = f32::from(viewport_size.height) - padding * 2.0;
-
-        // Vertical scroll
-        let cursor_y = f32::from(cursor_px.y) + self.scroll_offset_y;
-        if cursor_y < self.scroll_offset_y {
-            self.scroll_offset_y = cursor_y;
-        } else if cursor_y + self.style.line_height > self.scroll_offset_y + view_height {
-            self.scroll_offset_y = cursor_y + self.style.line_height - view_height;
-        }
-
-        // Horizontal scroll
-        let cursor_x = f32::from(cursor_px.x) + self.scroll_offset_x;
-        if cursor_x < self.scroll_offset_x {
-            self.scroll_offset_x = cursor_x;
-        } else if cursor_x + self.style.cursor_width > self.scroll_offset_x + view_width {
-            self.scroll_offset_x = cursor_x + self.style.cursor_width - view_width;
-        }
-
-        self.scroll_offset_y = self.scroll_offset_y.max(0.0);
-        self.scroll_offset_x = self.scroll_offset_x.max(0.0);
-    }
-
-    // ── Keyboard handling ─────────────────────────────
-
-    /// Handle a key down event. Returns true if the event was handled.
-    fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let keystroke = &event.keystroke;
-        let shift = keystroke.modifiers.shift;
-        // On macOS, the "command" key is the platform modifier.
-        let cmd = keystroke.modifiers.platform;
-        let alt = keystroke.modifiers.alt;
-        let ctrl = keystroke.modifiers.control;
-
-        // Use cmd on macOS for standard shortcuts.
-        let action_mod = cmd;
-
-        match keystroke.key.as_str() {
-            "left" => {
-                if action_mod && shift {
-                    self.cursor.move_home(&self.buffer, true);
-                } else if action_mod {
-                    self.cursor.move_home(&self.buffer, false);
-                } else if alt {
-                    self.cursor.move_word_left(&self.buffer, shift);
-                } else {
-                    self.cursor.move_left(&self.buffer, shift);
-                }
-                cx.notify();
-                true
-            }
-            "right" => {
-                if action_mod && shift {
-                    self.cursor.move_end(&self.buffer, true);
-                } else if action_mod {
-                    self.cursor.move_end(&self.buffer, false);
-                } else if alt {
-                    self.cursor.move_word_right(&self.buffer, shift);
-                } else {
-                    self.cursor.move_right(&self.buffer, shift);
-                }
-                cx.notify();
-                true
-            }
-            "up" => {
-                if action_mod {
-                    self.cursor.move_to_start(&self.buffer, shift);
-                } else {
-                    self.cursor.move_up(&self.buffer, shift);
-                }
-                cx.notify();
-                true
-            }
-            "down" => {
-                if action_mod {
-                    self.cursor.move_to_end(&self.buffer, shift);
-                } else {
-                    self.cursor.move_down(&self.buffer, shift);
-                }
-                cx.notify();
-                true
-            }
-            "home" => {
-                if ctrl && shift {
-                    self.cursor.move_to_start(&self.buffer, true);
-                } else if ctrl {
-                    self.cursor.move_to_start(&self.buffer, false);
-                } else {
-                    self.cursor.move_home(&self.buffer, shift);
-                }
-                cx.notify();
-                true
-            }
-            "end" => {
-                if ctrl && shift {
-                    self.cursor.move_to_end(&self.buffer, true);
-                } else if ctrl {
-                    self.cursor.move_to_end(&self.buffer, false);
-                } else {
-                    self.cursor.move_end(&self.buffer, shift);
-                }
-                cx.notify();
-                true
-            }
-            "backspace" => {
-                if alt {
-                    self.delete_word_left(cx);
-                } else {
-                    self.backspace(cx);
-                }
-                true
-            }
-            "delete" => {
-                self.delete_forward(cx);
-                true
-            }
-            "enter" => {
-                self.insert_text("\n", cx);
-                true
-            }
-            "tab" => {
-                self.insert_text("    ", cx);
-                true
-            }
-            "a" if action_mod => {
-                self.select_all(cx);
-                true
-            }
-            "c" if action_mod => {
-                self.copy(window, cx);
-                true
-            }
-            "x" if action_mod => {
-                self.cut(window, cx);
-                true
-            }
-            "v" if action_mod => {
-                self.paste(window, cx);
-                true
-            }
-            "z" if action_mod && shift => {
-                // Redo - not implemented yet
-                true
-            }
-            "z" if action_mod => {
-                // Undo - not implemented yet
-                true
-            }
-            _ => {
-                // Insert the character if it's printable.
-                if let Some(ref ch) = keystroke.key_char {
-                    if !action_mod && !ctrl {
-                        self.insert_text(ch, cx);
-                        return true;
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    /// Handle mouse down event.
-    fn handle_mouse_down(
+    /// 鼠标按下时，开始选择文本。
+    fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.is_selecting = true;
+
+        if event.modifiers.shift {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+        } else {
+            self.move_to(self.index_for_mouse_position(event.position), cx)
+        }
+    }
+
+    /// 鼠标抬起时，结束选择文本。
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
+        self.is_selecting = false;
+    }
+
+    /// 鼠标移动时，更新选择文本。
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_selecting {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+        }
+    }
+
+    /// 显示字符面板。
+    fn show_character_palette(
+        &mut self,
+        _: &ShowCharacterPalette,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle);
+        window.show_character_palette();
+    }
 
-        if let Some(bounds) = self.content_bounds {
-            let pos = self.pixel_to_position(event.position, bounds.origin);
+    /// 提交输入内容，触发 `TextInputEvent::Submit` 事件。
+    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Submit);
+    }
 
-            if event.click_count == 2 {
-                // Double-click: select word.
-                let word_start = self.buffer.move_word_left(pos);
-                let word_end = self.buffer.move_word_right(pos);
-                self.cursor.set_position(word_start);
-                self.cursor.select_to(word_end);
-            } else if event.click_count == 3 {
-                // Triple-click: select line.
-                let line_start = self.buffer.line_start(pos);
-                let line_end = self.buffer.line_end(pos);
-                self.cursor.set_position(line_start);
-                self.cursor.select_to(line_end);
-            } else if event.modifiers.shift {
-                self.cursor.select_to(pos);
-            } else {
-                self.cursor.set_position(pos);
-            }
+    /// 插入换行符（通常由 Shift+Enter 触发）。
+    fn insert_newline(&mut self, _: &InsertNewline, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, "\n", window, cx)
+    }
 
-            self.is_dragging = true;
-            cx.notify();
+    /// 粘贴内容。
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
-    /// Handle mouse move event (for drag-to-select).
-    fn handle_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.is_dragging {
-            if let Some(bounds) = self.content_bounds {
-                let pos = self.pixel_to_position(event.position, bounds.origin);
-                self.cursor.select_to(pos);
-                cx.notify();
-            }
+    /// 复制内容。
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
         }
     }
 
-    /// Handle mouse up event.
-    fn handle_mouse_up(
+    /// 剪切内容。
+    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
+            self.replace_text_in_range(None, "", window, cx)
+        }
+    }
+
+    /// 移动光标到指定位置。
+    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.selected_range = offset..offset;
+        cx.notify()
+    }
+
+    /// 光标当前位置在 selected_range 的哪个边界，取决于 selection_reversed 标志。
+    fn cursor_offset(&self) -> usize {
+        if self.selection_reversed {
+            self.selected_range.start
+        } else {
+            self.selected_range.end
+        }
+    }
+
+    /// 鼠标位置对应的文本索引。根据最后一次布局计算文本行和位置，返回对应的文本索引。
+    fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        if self.content.is_empty() {
+            return 0;
+        }
+
+        let (Some(bounds), Some(lines), Some(line_starts), Some(line_offsets), Some(line_height)) = (
+            self.last_bounds.as_ref(),
+            self.last_layout.as_ref(),
+            self.last_line_starts.as_ref(),
+            self.last_line_offsets.as_ref(),
+            self.last_line_height,
+        ) else {
+            return 0;
+        };
+        if lines.is_empty() || line_starts.is_empty() || line_offsets.is_empty() {
+            return 0;
+        }
+        if position.y < bounds.top() {
+            return 0;
+        }
+        if position.y > bounds.bottom() {
+            return self.content.len();
+        }
+
+        let y = position.y - bounds.top();
+        let line_index = line_offsets
+            .iter()
+            .enumerate()
+            .find_map(|(ix, line_offset)| {
+                let line_bottom =
+                    *line_offset + line_height * Self::visual_line_count(&lines[ix]) as f32;
+                (y < line_bottom).then_some(ix)
+            })
+            .unwrap_or(lines.len().saturating_sub(1));
+
+        let line = &lines[line_index];
+        let line_start = line_starts[line_index];
+        let local_y = y - line_offsets[line_index];
+        let local_index = line
+            .closest_index_for_position(point(position.x - bounds.left(), local_y), line_height)
+            .unwrap_or_else(|index| index);
+
+        (line_start + local_index).min(self.content.len())
+    }
+
+    /// 选择到指定位置。根据 selection_reversed 标志更新 selected_range 的起始或结束位置，并确保 start <= end。
+    fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.selection_reversed {
+            self.selected_range.start = offset
+        } else {
+            self.selected_range.end = offset
+        };
+        if self.selected_range.end < self.selected_range.start {
+            self.selection_reversed = !self.selection_reversed;
+            self.selected_range = self.selected_range.end..self.selected_range.start;
+        }
+        cx.notify()
+    }
+
+    fn offset_from_utf16(&self, offset: usize) -> usize {
+        let mut utf8_offset = 0;
+        let mut utf16_count = 0;
+
+        for ch in self.content.chars() {
+            if utf16_count >= offset {
+                break;
+            }
+            utf16_count += ch.len_utf16();
+            utf8_offset += ch.len_utf8();
+        }
+
+        utf8_offset
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        let mut utf16_offset = 0;
+        let mut utf8_count = 0;
+
+        for ch in self.content.chars() {
+            if utf8_count >= offset {
+                break;
+            }
+            utf8_count += ch.len_utf8();
+            utf16_offset += ch.len_utf16();
+        }
+
+        utf16_offset
+    }
+
+    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+
+    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
+        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+    }
+
+    fn previous_boundary(&self, offset: usize) -> usize {
+        self.content
+            .grapheme_indices(true)
+            .rev()
+            .find_map(|(idx, _)| (idx < offset).then_some(idx))
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, offset: usize) -> usize {
+        self.content
+            .grapheme_indices(true)
+            .find_map(|(idx, _)| (idx > offset).then_some(idx))
+            .unwrap_or(self.content.len())
+    }
+
+    fn line_index_for_offset(line_starts: &[usize], offset: usize) -> usize {
+        line_starts
+            .partition_point(|start| *start <= offset)
+            .saturating_sub(1)
+    }
+
+    fn visual_line_count(line: &WrappedLine) -> usize {
+        line.wrap_boundaries().len() + 1
+    }
+}
+
+pub type Textarea = TextInput;
+
+/// 初始化文本输入相关的全局快捷键绑定。
+/// ```
+/// input::init(cx);
+/// ```
+/// 会注册文本编辑常用按键，包括：
+/// - `backspace` / `delete`
+/// - `enter`
+/// - `shift-enter`
+/// - `left` / `right`
+/// - `shift-left` / `shift-right`
+/// - `cmd-a` / `cmd-c` / `cmd-v` / `cmd-x`
+/// - `home` / `end`
+/// - `ctrl-cmd-space`
+pub fn init(cx: &mut App) {
+    // 绑定文本输入相关的快捷键到 `TextInput` 组件。按键事件会被 `TextInput` 实例捕获并调用对应的方法处理输入逻辑。
+    cx.bind_keys([
+        KeyBinding::new("backspace", Backspace, None),
+        KeyBinding::new("delete", Delete, None),
+        KeyBinding::new("enter", Submit, None),
+        KeyBinding::new("shift-enter", InsertNewline, None),
+        KeyBinding::new("left", Left, None),
+        KeyBinding::new("right", Right, None),
+        KeyBinding::new("shift-left", SelectLeft, None),
+        KeyBinding::new("shift-right", SelectRight, None),
+        KeyBinding::new("cmd-a", SelectAll, None),
+        KeyBinding::new("cmd-v", Paste, None),
+        KeyBinding::new("cmd-c", Copy, None),
+        KeyBinding::new("cmd-x", Cut, None),
+        KeyBinding::new("home", Home, None),
+        KeyBinding::new("end", End, None),
+        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
+    ]);
+}
+
+/// 渲染一个 `Textarea` 输入实体。
+/// ```
+/// let element = render_textarea(&textarea);
+/// ```
+/// - `textarea`: 文本输入实体句柄
+/// 返回一个可直接挂载到布局中的输入组件元素。
+/// 该函数本身不创建状态，只负责把已有实体转成可渲染元素。
+pub fn render_textarea(textarea: &Entity<Textarea>) -> impl IntoElement {
+    textarea.clone()
+}
+
+impl EntityInputHandler for TextInput {
+    /// 获取指定范围的文本。
+    fn text_for_range(
         &mut self,
-        _event: &MouseUpEvent,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
         _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = self.range_from_utf16(&range_utf16);
+        actual_range.replace(self.range_to_utf16(&range));
+        Some(self.content[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.range_to_utf16(&self.selected_range),
+            reversed: self.selection_reversed,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.marked_range
+            .as_ref()
+            .map(|range| self.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.is_dragging = false;
+        let range = range_utf16
+            .as_ref()
+            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.marked_range.take();
         cx.notify();
     }
-}
 
-impl Focusable for Textarea {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
+        if !new_text.is_empty() {
+            self.marked_range = Some(range.start..range.start + new_text.len());
+        } else {
+            self.marked_range = None;
+        }
+        self.selected_range = new_selected_range_utf16
+            .as_ref()
+            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let last_layouts = self.last_layout.as_ref()?;
+        let last_line_starts = self.last_line_starts.as_ref()?;
+        let last_line_offsets = self.last_line_offsets.as_ref()?;
+        let line_height = self.last_line_height?;
+        if last_layouts.is_empty() || last_line_starts.is_empty() || last_line_offsets.is_empty() {
+            return None;
+        }
+
+        let range = self.range_from_utf16(&range_utf16);
+
+        let start_line = Self::line_index_for_offset(last_line_starts, range.start);
+        let end_line = Self::line_index_for_offset(last_line_starts, range.end);
+
+        let start_line_start = last_line_starts[start_line];
+        let end_line_start = last_line_starts[end_line];
+
+        let start_pos = last_layouts[start_line]
+            .position_for_index(range.start.saturating_sub(start_line_start), line_height)
+            .unwrap_or(point(px(0.0), px(0.0)));
+        let end_pos = last_layouts[end_line]
+            .position_for_index(range.end.saturating_sub(end_line_start), line_height)
+            .unwrap_or(point(px(0.0), px(0.0)));
+
+        Some(Bounds::from_corners(
+            point(
+                bounds.left() + start_pos.x,
+                bounds.top() + last_line_offsets[start_line] + start_pos.y,
+            ),
+            point(
+                bounds.left() + end_pos.x,
+                bounds.top() + last_line_offsets[end_line] + end_pos.y + line_height,
+            ),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
     }
 }
 
-impl Render for Textarea {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let style = self.style.clone();
-        let is_focused = self.focus_handle.is_focused(window);
-        let border_color = if is_focused {
-            style.focused_border_color
+struct TextElement {
+    input: Entity<TextInput>,
+}
+
+struct PrepaintState {
+    lines: Vec<WrappedLine>,
+    line_starts: Vec<usize>,
+    line_offsets: Vec<Pixels>,
+    cursor: Option<PaintQuad>,
+    selections: Vec<PaintQuad>,
+}
+
+impl IntoElement for TextElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let input = self.input.read(cx);
+        let content = input.content.clone();
+        let selected_range = input.selected_range.clone();
+        let cursor = input.cursor_offset();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let wrap_width = Some(bounds.size.width);
+
+        let (display_text, text_color) = if content.is_empty() {
+            // 占位符文本：使用配置文本颜色的50%透明度
+            let Hsla { h, s, l, a } = input.text_color;
+            (input.placeholder.clone(), hsla(h, s, l, a * 0.5))
         } else {
-            style.border_color
+            // 正常文本：使用配置的文本颜色
+            (content.clone(), input.text_color)
         };
 
-        let lines: Vec<String> = self.buffer.lines().to_vec();
-        let cursor_pos = self.cursor.position;
-        let selection = self.cursor.selection();
-        let line_height = style.line_height;
-        let font_size = style.font_size;
-        let padding = style.padding;
-        let char_width = font_size * 0.6;
-        let scroll_x = self.scroll_offset_x;
-        let scroll_y = self.scroll_offset_y;
-        let cursor_color = style.cursor_color;
-        let cursor_width = style.cursor_width;
-        let text_color = style.text_color;
-        let selection_bg = style.selection_background;
-        let _selection_text_col = style.selection_text_color;
-        let bg_color = style.background;
-        let placeholder = self.placeholder.clone();
-        let placeholder_color = style.placeholder_color;
-        let font_family_str = style.font_family.clone();
+        let run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
 
-        let show_placeholder = lines.len() == 1 && lines[0].is_empty() && !placeholder.is_empty();
+        let runs = if !content.is_empty() {
+            if let Some(marked_range) = input.marked_range.as_ref() {
+                vec![
+                    TextRun {
+                        len: marked_range.start,
+                        ..run.clone()
+                    },
+                    TextRun {
+                        len: marked_range.end - marked_range.start,
+                        underline: Some(UnderlineStyle {
+                            color: Some(run.color),
+                            thickness: px(1.0),
+                            wavy: false,
+                        }),
+                        ..run.clone()
+                    },
+                    TextRun {
+                        len: display_text.len() - marked_range.end,
+                        ..run
+                    },
+                ]
+                .into_iter()
+                .filter(|segment| segment.len > 0)
+                .collect::<Vec<_>>()
+            } else {
+                vec![run]
+            }
+        } else {
+            vec![run]
+        };
 
-        let entity = cx.entity().clone();
+        let mut lines = window
+            .text_system()
+            .shape_text(display_text, font_size, &runs, wrap_width, None)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
 
-        div()
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .border_color(border_color)
-            .rounded(px(style.corner_radius))
-            .overflow_hidden()
-            .on_key_down(cx.listener(
-                move |view: &mut Textarea, event: &KeyDownEvent, window, cx| {
-                    view.handle_key_down(event, window, cx);
-                    // Ensure cursor stays visible after key actions.
-                    if let Some(bounds) = view.content_bounds {
-                        view.ensure_cursor_visible(bounds.size);
+        if lines.is_empty() {
+            lines.push(
+                window
+                    .text_system()
+                    .shape_text(" ".into(), font_size, &[], wrap_width, None)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+            );
+        }
+
+        let mut line_starts = Vec::new();
+
+        if content.is_empty() {
+            line_starts.push(0);
+        } else {
+            let line_texts: Vec<&str> = content.split('\n').collect();
+            let mut offset = 0;
+
+            for (idx, line_text) in line_texts.iter().enumerate() {
+                line_starts.push(offset);
+                let line_len = line_text.len();
+
+                offset += line_len;
+                if idx + 1 < line_texts.len() {
+                    offset += 1;
+                }
+            }
+        }
+
+        if line_starts.len() != lines.len() {
+            line_starts.resize(lines.len(), content.len());
+        }
+
+        let line_height = window.line_height();
+        let mut line_offsets = Vec::with_capacity(lines.len());
+        let mut accumulated_y = px(0.0);
+        for line in &lines {
+            line_offsets.push(accumulated_y);
+            accumulated_y += line_height * TextInput::visual_line_count(line) as f32;
+        }
+
+        let mut selections = Vec::new();
+
+        let cursor = if selected_range.is_empty() {
+            let line_index = TextInput::line_index_for_offset(&line_starts, cursor);
+            let line_start = line_starts[line_index];
+            let cursor_pos = lines[line_index]
+                .position_for_index(cursor.saturating_sub(line_start), line_height)
+                .unwrap_or(point(px(0.0), px(0.0)));
+            let top = bounds.top() + line_offsets[line_index] + cursor_pos.y;
+
+            Some(fill(
+                Bounds::new(
+                    point(bounds.left() + cursor_pos.x, top),
+                    size(px(2.), line_height),
+                ),
+                input.cursor_color,
+            ))
+        } else {
+            let start_line = TextInput::line_index_for_offset(&line_starts, selected_range.start);
+            let end_line = TextInput::line_index_for_offset(&line_starts, selected_range.end);
+
+            for line_index in start_line..=end_line {
+                let line_start = line_starts[line_index];
+                let line_end = line_start + lines[line_index].len();
+
+                let segment_start = max(selected_range.start, line_start);
+                let segment_end = min(selected_range.end, line_end);
+                if segment_start >= segment_end {
+                    continue;
+                }
+
+                let local_start = segment_start - line_start;
+                let local_end = segment_end - line_start;
+                let start_pos = lines[line_index]
+                    .position_for_index(local_start, line_height)
+                    .unwrap_or(point(px(0.0), px(0.0)));
+                let end_pos = lines[line_index]
+                    .position_for_index(local_end, line_height)
+                    .unwrap_or(point(px(0.0), start_pos.y));
+
+                let top_base = bounds.top() + line_offsets[line_index];
+                if (end_pos.y - start_pos.y).abs() < px(0.5) {
+                    selections.push(fill(
+                        Bounds::from_corners(
+                            point(bounds.left() + start_pos.x, top_base + start_pos.y),
+                            point(
+                                bounds.left() + end_pos.x,
+                                top_base + end_pos.y + line_height,
+                            ),
+                        ),
+                        input.selection_color,
+                    ));
+                } else {
+                    selections.push(fill(
+                        Bounds::from_corners(
+                            point(bounds.left() + start_pos.x, top_base + start_pos.y),
+                            point(bounds.right(), top_base + start_pos.y + line_height),
+                        ),
+                        input.selection_color,
+                    ));
+
+                    let mut y = start_pos.y + line_height;
+                    while y < end_pos.y {
+                        selections.push(fill(
+                            Bounds::from_corners(
+                                point(bounds.left(), top_base + y),
+                                point(bounds.right(), top_base + y + line_height),
+                            ),
+                            input.selection_color,
+                        ));
+                        y += line_height;
                     }
-                },
-            ))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(
-                    move |view: &mut Textarea, event: &MouseDownEvent, window, cx| {
-                        view.handle_mouse_down(event, window, cx);
-                    },
+
+                    if end_pos.x > px(0.0) {
+                        selections.push(fill(
+                            Bounds::from_corners(
+                                point(bounds.left(), top_base + end_pos.y),
+                                point(
+                                    bounds.left() + end_pos.x,
+                                    top_base + end_pos.y + line_height,
+                                ),
+                            ),
+                            input.selection_color,
+                        ));
+                    }
+                }
+            }
+
+            None
+        };
+
+        PrepaintState {
+            lines,
+            line_starts,
+            line_offsets,
+            cursor,
+            selections,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.input.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
+        for selection in prepaint.selections.drain(..) {
+            window.paint_quad(selection);
+        }
+
+        let line_height = window.line_height();
+        for (line_index, line) in prepaint.lines.iter().enumerate() {
+            let origin = point(
+                bounds.left(),
+                bounds.top() + prepaint.line_offsets[line_index],
+            );
+            let line_bounds = Bounds::new(
+                origin,
+                size(
+                    bounds.size.width,
+                    line_height * TextInput::visual_line_count(line) as f32,
                 ),
+            );
+            line.paint(
+                origin,
+                line_height,
+                TextAlign::Left,
+                Some(line_bounds),
+                window,
+                cx,
             )
-            .on_mouse_move(cx.listener(
-                move |view: &mut Textarea, event: &MouseMoveEvent, window, cx| {
-                    view.handle_mouse_move(event, window, cx);
-                },
-            ))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(
-                    move |view: &mut Textarea, event: &MouseUpEvent, window, cx| {
-                        view.handle_mouse_up(event, window, cx);
-                    },
-                ),
-            )
+            .unwrap();
+        }
+
+        if focus_handle.is_focused(window)
+            && let Some(cursor) = prepaint.cursor.take()
+        {
+            window.paint_quad(cursor);
+        }
+
+        let lines = std::mem::take(&mut prepaint.lines);
+        let line_starts = std::mem::take(&mut prepaint.line_starts);
+        let line_offsets = std::mem::take(&mut prepaint.line_offsets);
+
+        self.input.update(cx, |input, _cx| {
+            input.last_layout = Some(lines);
+            input.last_line_starts = Some(line_starts);
+            input.last_line_offsets = Some(line_offsets);
+            input.last_line_height = Some(line_height);
+            input.last_bounds = Some(bounds);
+        });
+    }
+}
+
+impl Render for TextInput {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .w_full()
+            .key_context("TextInput")
+            .track_focus(&self.focus_handle(cx))
+            .cursor(CursorStyle::IBeam)
+            .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::insert_newline))
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::show_character_palette))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::copy))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .bg(rgb(0x1b1b1b))
+            .line_height(px(20.0))
+            .text_size(px(14.0))
             .child(
-                canvas(
-                    // Prepaint: store bounds.
-                    {
-                        let entity = entity.clone();
-                        move |bounds, _window, cx| {
-                            entity.update(cx, |view, _cx| {
-                                view.content_bounds = Some(bounds);
-                            });
-                            bounds
-                        }
-                    },
-                    // Paint: render text, cursor, selections.
-                    move |bounds: Bounds<Pixels>, _prev: Bounds<Pixels>, window, cx| {
-                        let origin = bounds.origin;
-                        let _w = f32::from(bounds.size.width);
-                        let h = f32::from(bounds.size.height);
-
-                        // Background fill.
-                        window.paint_quad(fill(bounds, bg_color));
-
-                        // Draw selection highlights.
-                        if let Some(sel) = selection {
-                            for line_idx in sel.start.line..=sel.end.line {
-                                if line_idx >= lines.len() {
-                                    break;
-                                }
-                                let line_str = &lines[line_idx];
-                                use unicode_segmentation::UnicodeSegmentation;
-
-                                let sel_start_col = if line_idx == sel.start.line {
-                                    line_str[..sel.start.col].graphemes(true).count()
-                                } else {
-                                    0
-                                };
-                                let sel_end_col = if line_idx == sel.end.line {
-                                    line_str[..sel.end.col].graphemes(true).count()
-                                } else {
-                                    line_str.graphemes(true).count()
-                                };
-
-                                if sel_start_col == sel_end_col && line_idx != sel.end.line {
-                                    // Full-width highlight for lines in the middle of selection
-                                    // when the line is empty or fully selected.
-                                }
-
-                                let x1 = padding + sel_start_col as f32 * char_width - scroll_x;
-                                let x2 = padding + sel_end_col as f32 * char_width - scroll_x;
-                                let y = padding + line_idx as f32 * line_height - scroll_y;
-
-                                if x2 > x1 {
-                                    let sel_bounds = Bounds {
-                                        origin: point(origin.x + px(x1), origin.y + px(y)),
-                                        size: size(px(x2 - x1), px(line_height)),
-                                    };
-                                    window.paint_quad(fill(sel_bounds, selection_bg));
-                                }
-                            }
-                        }
-
-                        // Draw text lines.
-                        let font_family: SharedString = font_family_str.clone().into();
-                        for (line_idx, line_str) in lines.iter().enumerate() {
-                            let y = padding + line_idx as f32 * line_height - scroll_y;
-                            if y + line_height < 0.0 || y > h {
-                                continue;
-                            }
-
-                            let display_text: SharedString = if show_placeholder && line_idx == 0 {
-                                placeholder.clone().into()
-                            } else {
-                                line_str.clone().into()
-                            };
-
-                            if display_text.is_empty() {
-                                continue;
-                            }
-
-                            let color = if show_placeholder && line_idx == 0 {
-                                placeholder_color
-                            } else {
-                                text_color
-                            };
-
-                            let text_origin =
-                                point(origin.x + px(padding - scroll_x), origin.y + px(y));
-
-                            let run = gpui::TextRun {
-                                len: display_text.len(),
-                                font: gpui::Font {
-                                    family: font_family.clone(),
-                                    features: gpui::FontFeatures::default(),
-                                    fallbacks: None,
-                                    weight: gpui::FontWeight::NORMAL,
-                                    style: gpui::FontStyle::Normal,
-                                },
-                                color,
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            };
-
-                            let shaped = window.text_system().shape_line(
-                                display_text,
-                                px(font_size),
-                                &[run],
-                                None,
-                            );
-
-                            shaped.paint(text_origin, px(line_height), window, cx).ok();
-                        }
-
-                        // Draw cursor (blinking caret).
-                        if is_focused {
-                            use unicode_segmentation::UnicodeSegmentation;
-                            let cursor_line = &lines[cursor_pos.line.min(lines.len() - 1)];
-                            let grapheme_count = cursor_line
-                                [..cursor_pos.col.min(cursor_line.len())]
-                                .graphemes(true)
-                                .count();
-
-                            let cx_pos = padding + grapheme_count as f32 * char_width - scroll_x;
-                            let cy_pos = padding + cursor_pos.line as f32 * line_height - scroll_y;
-
-                            let cursor_bounds = Bounds {
-                                origin: point(origin.x + px(cx_pos), origin.y + px(cy_pos)),
-                                size: size(px(cursor_width), px(line_height)),
-                            };
-                            window.paint_quad(fill(cursor_bounds, cursor_color));
-                        }
-                    },
-                )
-                .size_full(),
+                div()
+                    .h(px(104.0))
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(self.bg_color)
+                    .child(TextElement { input: cx.entity() }),
             )
+    }
+}
+
+impl Focusable for TextInput {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }

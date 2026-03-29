@@ -1,55 +1,30 @@
 /// # gpui-editor
 ///
-/// A multi-line textarea library built with [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui).
+/// A multi-line textarea component built with [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 ///
 /// ## Features
 ///
-/// - Multi-line text editing
-/// - HTML textarea–like keyboard shortcuts
-/// - Custom cursor color and width
-/// - Selection background and text color
-/// - Custom background and font colors
-/// - Placeholder text support
-/// - Read-only mode
-/// - Mouse click-to-position and drag-to-select
-/// - Double-click to select word, triple-click to select line
+/// - Multi-line text editing with IME support
+/// - Keyboard shortcuts (Backspace, Delete, Arrow keys, Cmd+A/C/V/X, Home/End)
+/// - Mouse click to position cursor, drag to select, Shift+click to extend
+/// - Customizable colors (background, cursor, text, selection)
+/// - Placeholder text
+/// - Word wrap via gpui `WrappedLine`
 ///
 /// ## Usage
 ///
-/// ```rust,no_run
-/// use gpui_editor::textarea::Textarea;
-/// use gpui_editor::style::TextareaStyle;
+/// ```rust,ignore
+/// use gpui_editor::textarea::{TextInput, Textarea, init, render_textarea};
 ///
-/// // In a gpui application:
-/// // let textarea = cx.new(|cx| {
-/// //     let mut ta = Textarea::new(cx);
-/// //     ta.set_text("Hello, world!");
-/// //     ta.set_placeholder("Type here...");
-/// //     ta.set_style(TextareaStyle::dark());
-/// //     ta
-/// // });
+/// // In your gpui App setup:
+/// init(cx); // register key bindings
+///
+/// let textarea = cx.new(|cx| {
+///     TextInput::new(cx)
+///         .placeholder("Type here...")
+///         .cursor_color(hsla(210.0/360.0, 1.0, 0.5, 1.0))
+/// });
 /// ```
-///
-/// ## Modules
-///
-/// - [`buffer`] – Text buffer with line-based storage and editing operations
-/// - [`cursor`] – Cursor position and selection management
-/// - [`style`] – Theming and visual configuration
-/// - [`textarea`] – The main textarea gpui component
 
-/// Text buffer: stores multi-line text and provides editing primitives.
-pub mod buffer;
-
-/// Cursor and selection management.
-pub mod cursor;
-
-/// Styling / theming for the textarea.
-pub mod style;
-
-/// The main textarea component (gpui `Render` implementation).
+/// The main textarea component.
 pub mod textarea;
-
-pub use buffer::{Position, TextBuffer, TextRange};
-pub use cursor::Cursor;
-pub use style::TextareaStyle;
-pub use textarea::{Textarea, TextareaEvent};

@@ -2120,8 +2120,6 @@ name = "gpui-editor"
 version = "0.1.0"
 dependencies = [
  "gpui",
- "log",
- "smallvec",
  "unicode-segmentation",
 ]
 

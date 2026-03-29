@@ -1,12 +1,7 @@
 /// Demo application showcasing the gpui-editor textarea component.
-///
-/// Displays a window with a textarea that supports multi-line editing,
-/// keyboard shortcuts, mouse selection, and custom styling.
 use gpui::*;
-use gpui_editor::style::TextareaStyle;
-use gpui_editor::textarea::Textarea;
+use gpui_editor::textarea::{init, render_textarea, TextInput, Textarea};
 
-/// Root view wrapping the textarea.
 struct DemoView {
     textarea: Entity<Textarea>,
 }
@@ -14,13 +9,12 @@ struct DemoView {
 impl DemoView {
     fn new(cx: &mut Context<Self>) -> Self {
         let textarea = cx.new(|cx| {
-            let mut ta = Textarea::new(cx);
-            ta.set_text("Hello, gpui-editor!\n\nThis is a multi-line textarea.\nTry editing, selecting, and using keyboard shortcuts.\n\nSupported shortcuts:\n  - Cmd+A: Select all\n  - Cmd+C: Copy\n  - Cmd+X: Cut\n  - Cmd+V: Paste\n  - Cmd+Z: Undo (todo)\n  - Arrow keys: Move cursor\n  - Shift+Arrow: Extend selection\n  - Alt+Left/Right: Word movement\n  - Home/End: Line start/end\n  - Double-click: Select word\n  - Triple-click: Select line");
-            ta.set_placeholder("Type something here...");
-
-            // Use dark style.
-            ta.set_style(TextareaStyle::dark());
-            ta
+            TextInput::new(cx)
+                .placeholder("请输入内容...")
+                .bg_color(hsla(0.0, 0.0, 0.137, 1.0))
+                .cursor_color(hsla(210.0 / 360.0, 1.0, 0.5, 1.0))
+                .text_color(hsla(0.0, 0.0, 0.969, 1.0))
+                .selection_color(hsla(250.0 / 360.0, 1.0, 0.5, 0.19))
         });
 
         Self { textarea }
@@ -33,7 +27,7 @@ impl Render for DemoView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(hsla(0.0, 0.0, 0.08, 1.0))
+            .bg(rgb(0x1b1b1b))
             .p(px(24.0))
             .gap(px(16.0))
             .child(
@@ -45,17 +39,15 @@ impl Render for DemoView {
             .child(
                 div()
                     .flex_1()
-                    .border_1()
-                    .border_color(hsla(0.0, 0.0, 0.3, 1.0))
-                    .rounded(px(8.0))
-                    .overflow_hidden()
-                    .child(self.textarea.clone()),
+                    .child(render_textarea(&self.textarea)),
             )
     }
 }
 
 fn main() {
     Application::new().run(move |cx: &mut App| {
+        init(cx);
+
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
