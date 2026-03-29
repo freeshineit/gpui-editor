@@ -1,3 +1,47 @@
+//! 多行文本输入组件。
+//!
+//! 提供基于 gpui 的多行文本编辑器，支持：
+//!
+//! - 多行文本编辑、自动换行
+//! - IME（输入法）支持，兼容中文/日文/韩文等
+//! - 键盘快捷键：方向键、Backspace/Delete、Home/End、Cmd+A/C/V/X
+//! - 鼠标点击定位光标、拖拽选择、Shift+点击扩展选区
+//! - 上下键跨行移动光标（含自动换行的视觉行）
+//! - 光标闪烁动画（500ms 间隔）
+//! - 内容自适应高度，可设置最大高度并启用滚动
+//! - 输入字符数限制（按 Unicode 字素计算）
+//! - Enter 键模式切换（Enter 提交/换行）
+//! - 完全可定制的颜色主题（背景、光标、文本、选区）
+//!
+//! # 快速开始
+//!
+//! ```ignore
+//! use gpui_editor::textarea::{TextInput, Textarea, EnterMode, init, render_textarea};
+//!
+//! // 1. 注册快捷键（在 App 初始化时调用一次）
+//! init(cx);
+//!
+//! // 2. 创建输入实体
+//! let textarea = cx.new(|cx| {
+//!     TextInput::new(cx)
+//!         .placeholder("请输入内容...")
+//!         .max_length(500)
+//!         .max_height(px(300.0))
+//!         .enter_mode(EnterMode::EnterNewline)
+//! });
+//!
+//! // 3. 监听事件
+//! cx.subscribe(&textarea, |this, _textarea, event, cx| {
+//!     match event {
+//!         TextInputEvent::Submit => { /* 提交逻辑 */ }
+//!         TextInputEvent::InsertNewline => { /* 换行回调 */ }
+//!     }
+//! }).detach();
+//!
+//! // 4. 渲染
+//! render_textarea(&textarea)
+//! ```
+
 use std::cmp::{max, min};
 use std::ops::Range;
 
@@ -38,18 +82,50 @@ actions!(
     ]
 );
 
+/// 多行文本输入组件状态。
+///
+/// `TextInput` 持有编辑器的所有状态，包括文本内容、光标位置、选区、
+/// 布局缓存和配置项。通过 builder 模式进行配置。
+///
+/// # 示例
+///
+/// ```ignore
+/// let textarea = cx.new(|cx| {
+///     TextInput::new(cx)
+///         .placeholder("请输入...")
+///         .max_length(200)
+///         .max_height(px(300.0))
+///         .enter_mode(EnterMode::EnterNewline)
+///         .bg_color(hsla(0.0, 0.0, 0.137, 1.0))
+///         .cursor_color(hsla(210.0/360.0, 1.0, 0.5, 1.0))
+///         .text_color(hsla(0.0, 0.0, 0.969, 1.0))
+///         .selection_color(hsla(250.0/360.0, 1.0, 0.5, 0.19))
+/// });
+/// ```
 pub struct TextInput {
+    /// 焦点句柄，用于管理键盘输入焦点
     focus_handle: FocusHandle,
+    /// 当前输入的文本内容
     content: SharedString,
+    /// 占位文本，输入为空时显示
     placeholder: SharedString,
+    /// 当前选区的字节范围（start..end），光标无选区时 start == end
     selected_range: Range<usize>,
+    /// 选区方向是否反转（true 表示光标在选区起始端）
     selection_reversed: bool,
+    /// IME 输入法标记范围（组合输入未确认的文本区域）
     marked_range: Option<Range<usize>>,
+    /// 上一次排版的换行布局结果（每个逻辑行一个 WrappedLine）
     last_layout: Option<Vec<WrappedLine>>,
+    /// 每个逻辑行在文本中的起始字节偏移量
     last_line_starts: Option<Vec<usize>>,
+    /// 每个逻辑行在垂直方向上的像素偏移量
     last_line_offsets: Option<Vec<Pixels>>,
+    /// 单行行高（像素）
     last_line_height: Option<Pixels>,
+    /// 上一次绘制时的输入框边界矩形
     last_bounds: Option<Bounds<Pixels>>,
+    /// 是否正在通过鼠标拖拽选择文本
     is_selecting: bool,
     /// 光标是否可见（用于闪烁）
     cursor_visible: bool,
@@ -71,11 +147,26 @@ pub struct TextInput {
     scroll_offset: Pixels,
     /// 上一次排版计算出的内容总高度
     last_content_height: Option<Pixels>,
+    /// Enter 键模式
+    mode: EnterMode,
+}
+
+/// Enter 键模式。控制 Enter 和 Shift+Enter 的行为。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnterMode {
+    /// Enter 提交，Shift+Enter 换行（默认）
+    #[default]
+    EnterSubmit,
+    /// Enter 换行，Shift+Enter 提交
+    EnterNewline,
 }
 
 #[derive(Clone, Debug)]
 pub enum TextInputEvent {
+    /// 提交事件（由 Enter 或 Shift+Enter 触发，取决于 EnterMode）
     Submit,
+    /// 换行事件（由 Enter 或 Shift+Enter 触发，取决于 EnterMode）
+    InsertNewline,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -115,6 +206,7 @@ impl TextInput {
             max_height: None,
             scroll_offset: px(0.0),
             last_content_height: None,
+            mode: EnterMode::default(),
         };
         this.start_blink_task(cx);
         this
@@ -195,6 +287,17 @@ impl TextInput {
     /// ```
     pub fn max_height(mut self, height: Pixels) -> Self {
         self.max_height = Some(height);
+        self
+    }
+
+    /// 设置 Enter 键模式。
+    ///
+    /// - `EnterMode::EnterSubmit`（默认）：Enter 提交，Shift+Enter 换行
+    /// - `EnterMode::EnterNewline`：Enter 换行，Shift+Enter 提交
+    ///
+    /// 提交时触发 `TextInputEvent::Submit`，换行时触发 `TextInputEvent::InsertNewline`。
+    pub fn enter_mode(mut self, mode: EnterMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -437,14 +540,28 @@ impl TextInput {
         window.show_character_palette();
     }
 
-    /// 提交输入内容，触发 `TextInputEvent::Submit` 事件。
-    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TextInputEvent::Submit);
+    /// 提交输入内容（由 Enter 键触发）。
+    /// 根据 mode 决定是提交还是换行。
+    fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        match self.mode {
+            EnterMode::EnterSubmit => cx.emit(TextInputEvent::Submit),
+            EnterMode::EnterNewline => {
+                self.replace_text_in_range(None, "\n", window, cx);
+                cx.emit(TextInputEvent::InsertNewline);
+            }
+        }
     }
 
-    /// 插入换行符（通常由 Shift+Enter 触发）。
+    /// 插入换行符（由 Shift+Enter 触发）。
+    /// 根据 mode 决定是换行还是提交。
     fn insert_newline(&mut self, _: &InsertNewline, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_text_in_range(None, "\n", window, cx)
+        match self.mode {
+            EnterMode::EnterSubmit => {
+                self.replace_text_in_range(None, "\n", window, cx);
+                cx.emit(TextInputEvent::InsertNewline);
+            }
+            EnterMode::EnterNewline => cx.emit(TextInputEvent::Submit),
+        }
     }
 
     /// 粘贴内容。
@@ -550,6 +667,8 @@ impl TextInput {
         cx.notify()
     }
 
+    /// 将 UTF-8 字节偏移量转换为 UTF-16 代码单元偏移量。
+    /// 用于和系统 IME 接口交互（macOS IME 使用 UTF-16 编码）。
     fn offset_from_utf16(&self, offset: usize) -> usize {
         let mut utf8_offset = 0;
         let mut utf16_count = 0;
@@ -565,6 +684,7 @@ impl TextInput {
         utf8_offset
     }
 
+    /// 将 UTF-8 字节偏移量转换为 UTF-16 代码单元偏移量。
     fn offset_to_utf16(&self, offset: usize) -> usize {
         let mut utf16_offset = 0;
         let mut utf8_count = 0;
@@ -580,14 +700,17 @@ impl TextInput {
         utf16_offset
     }
 
+    /// 将 UTF-8 字节范围转换为 UTF-16 范围。
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
     }
 
+    /// 将 UTF-16 范围转换为 UTF-8 字节范围。
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
         self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
     }
 
+    /// 查找指定偏移量之前最近的字素边界位置。
     fn previous_boundary(&self, offset: usize) -> usize {
         self.content
             .grapheme_indices(true)
@@ -596,6 +719,7 @@ impl TextInput {
             .unwrap_or(0)
     }
 
+    /// 查找指定偏移量之后最近的字素边界位置。
     fn next_boundary(&self, offset: usize) -> usize {
         self.content
             .grapheme_indices(true)
@@ -603,12 +727,14 @@ impl TextInput {
             .unwrap_or(self.content.len())
     }
 
+    /// 根据文本偏移量查找所在的逻辑行索引。
     fn line_index_for_offset(line_starts: &[usize], offset: usize) -> usize {
         line_starts
             .partition_point(|start| *start <= offset)
             .saturating_sub(1)
     }
 
+    /// 计算一个逻辑行包含的视觉行数（含自动换行产生的行）。
     fn visual_line_count(line: &WrappedLine) -> usize {
         line.wrap_boundaries().len() + 1
     }
@@ -680,6 +806,7 @@ impl TextInput {
     }
 }
 
+/// `TextInput` 的类型别名，方便在语义上区分多行输入场景。
 pub type Textarea = TextInput;
 
 /// 初始化文本输入相关的全局快捷键绑定。
