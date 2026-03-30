@@ -17,7 +17,7 @@
 ///
 /// ## Usage
 ///
-/// ```rust,ignore
+/// ```rust
 /// use gpui_editor::textarea::{TextInput, Textarea, EnterMode, init, render_textarea};
 ///
 /// // In your gpui App setup:

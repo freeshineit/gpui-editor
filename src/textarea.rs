@@ -15,7 +15,7 @@
 //!
 //! # 快速开始
 //!
-//! ```ignore
+//! ```rust
 //! use gpui_editor::textarea::{TextInput, Textarea, EnterMode, init, render_textarea};
 //!
 //! // 1. 注册快捷键（在 App 初始化时调用一次）
@@ -89,7 +89,7 @@ actions!(
 ///
 /// # 示例
 ///
-/// ```ignore
+/// ```rust
 /// let textarea = cx.new(|cx| {
 ///     TextInput::new(cx)
 ///         .placeholder("请输入...")
@@ -173,12 +173,12 @@ impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     /// 创建一个基础文本输入组件状态。
-    /// ```ignore
+    /// ```rust
     /// let input = TextInput::new(cx);
     /// ```
     /// 返回一个可聚焦、支持键盘输入、选区和剪贴板操作的文本输入状态。
     /// 默认占位文本为 `请输入内容...`。
-    /// ```ignore
+    /// ```rust
     /// let input = TextInput::new(cx);
     /// // 默认颜色配置：深灰背景、蓝色光标、白色文本、蓝色选中
     /// ```
@@ -221,7 +221,7 @@ impl TextInput {
     /// 设置输入框背景色。支持链式调用配置主题。
     ///
     /// 深色主题示例:
-    /// ```ignore
+    /// ```rust
     /// Textarea::new(cx)
     ///     .bg_color(hsla(0.0, 0.0, 0.137, 1.0))         // 深灰 #232323
     ///     .cursor_color(hsla(210.0/360.0, 1.0, 0.5, 1.0))   // 蓝 #0099ff
@@ -271,7 +271,7 @@ impl TextInput {
 
     /// 设置最大输入字符数（按 Unicode 字素计算）。超出限制的输入将被截断。
     ///
-    /// ```ignore
+    /// ```rust
     /// TextInput::new(cx).max_length(100) // 最多输入100个字符
     /// ```
     pub fn max_length(mut self, len: usize) -> Self {
@@ -282,7 +282,7 @@ impl TextInput {
     /// 设置输入框最大高度（像素）。内容超出后可滚动。
     /// 不设置时输入框高度随内容自适应增长。
     ///
-    /// ```ignore
+    /// ```rust
     /// TextInput::new(cx).max_height(px(200.0)) // 最大高度200px
     /// ```
     pub fn max_height(mut self, height: Pixels) -> Self {
@@ -810,7 +810,7 @@ impl TextInput {
 pub type Textarea = TextInput;
 
 /// 初始化文本输入相关的全局快捷键绑定。
-/// ```ignore
+/// ```rust
 /// input::init(cx);
 /// ```
 /// 会注册文本编辑常用按键，包括：
@@ -848,7 +848,7 @@ pub fn init(cx: &mut App) {
 }
 
 /// 渲染一个 `Textarea` 输入实体。
-/// ```ignore
+/// ```rust
 /// let element = render_textarea(&textarea);
 /// ```
 /// - `textarea`: 文本输入实体句柄
