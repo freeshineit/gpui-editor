@@ -1387,6 +1387,8 @@ impl Render for TextInput {
         div()
             .flex()
             .w_full()
+            // debug 
+            .debug()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
