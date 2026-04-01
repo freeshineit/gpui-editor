@@ -52,8 +52,43 @@ impl Render for DemoView {
     }
 }
 
+fn open_main_window(cx: &mut App) {
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(800.0), px(600.0)),
+                cx,
+            ))),
+            ..Default::default()
+        },
+        |_window, cx| cx.new(|cx| DemoView::new(cx)),
+    )
+    .unwrap();
+}
+
 fn main() {
-    Application::new().run(move |cx: &mut App| {
+    let app = Application::new();
+
+    app.on_reopen(|cx| {
+        if let Some(window) = cx.active_window() {
+            window
+                .update(cx, |_root, window, _cx| {
+                    window.activate_window();
+                })
+                .ok();
+        } else if cx.windows().is_empty() {
+            open_main_window(cx);
+        } else if let Some(window) = cx.windows().first().copied() {
+            window
+                .update(cx, |_root, window, _cx| {
+                    window.activate_window();
+                })
+                .ok();
+        }
+    });
+    
+    app.run(move |cx: &mut App| {
         init(cx);
 
         // Register global action handlers
@@ -125,17 +160,6 @@ fn main() {
             KeyBinding::new("shift-cmd-z", Redo, None),
         ]);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(800.0), px(600.0)),
-                    cx,
-                ))),
-                ..Default::default()
-            },
-            |_window, cx| cx.new(|cx| DemoView::new(cx)),
-        )
-        .unwrap();
+        open_main_window(cx);
     });
 }
