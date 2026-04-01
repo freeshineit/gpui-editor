@@ -1,6 +1,12 @@
 /// Demo application showcasing the gpui-editor textarea component.
 use gpui::*;
-use gpui_editor::textarea::{init, render_textarea, TextInput, Textarea};
+use gpui_editor::textarea::{init, render_textarea, Copy, Cut, Paste, Quit, SelectAll, TextInput, Textarea};
+
+// Define menu actions
+actions!(
+    demo,
+    [About, Hide, HideOthers, ShowAll, Minimize, Zoom, CloseWindow, Undo, Redo]
+);
 
 struct DemoView {
     textarea: Entity<Textarea>,
@@ -49,6 +55,75 @@ impl Render for DemoView {
 fn main() {
     Application::new().run(move |cx: &mut App| {
         init(cx);
+
+        // Register global action handlers
+        cx.on_action(|_: &About, _cx| {
+            // About dialog handled by OS on macOS
+        });
+        cx.on_action(|_: &Hide, cx| {
+            cx.hide();
+        });
+        cx.on_action(|_: &HideOthers, cx| {
+            cx.hide_other_apps();
+        });
+        cx.on_action(|_: &ShowAll, cx| {
+            cx.unhide_other_apps();
+        });
+        cx.on_action(|_: &Quit, cx| {
+            cx.quit();
+        });
+
+        cx.set_menus(vec![
+            Menu {
+                name: "gpui-editor".into(),
+                items: vec![
+                    MenuItem::action("About gpui-editor", About),
+                    MenuItem::separator(),
+                    MenuItem::os_submenu("Services", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("Hide gpui-editor", Hide),
+                    MenuItem::action("Hide Others", HideOthers),
+                    MenuItem::action("Show All", ShowAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit gpui-editor", Quit),
+                ],
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("Close Window", CloseWindow),
+                ],
+            },
+            Menu {
+                name: "Edit".into(),
+                items: vec![
+                    MenuItem::os_action("Undo", Undo, OsAction::Undo),
+                    MenuItem::os_action("Redo", Redo, OsAction::Redo),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", Cut, OsAction::Cut),
+                    MenuItem::os_action("Copy", Copy, OsAction::Copy),
+                    MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                    MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+                ],
+            },
+            Menu {
+                name: "Window".into(),
+                items: vec![
+                    MenuItem::action("Minimize", Minimize),
+                    MenuItem::action("Zoom", Zoom),
+                ],
+            },
+        ]);
+
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-m", Minimize, None),
+            KeyBinding::new("cmd-z", Undo, None),
+            KeyBinding::new("shift-cmd-z", Redo, None),
+        ]);
 
         cx.open_window(
             WindowOptions {
