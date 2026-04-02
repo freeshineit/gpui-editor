@@ -1,6 +1,6 @@
 /// Demo application showcasing the gpui-editor textarea component.
 use gpui::*;
-use gpui_editor::textarea::{init, render_textarea, Copy, Cut, Paste, Quit, SelectAll, TextInput, Textarea};
+use gpui_editor::textarea::{Copy, Cut, EnterMode, Paste, Quit, SelectAll, TextInput, Textarea, init, render_textarea};
 
 // Define menu actions
 actions!(
@@ -23,6 +23,7 @@ impl DemoView {
                 .cursor_color(hsla(210.0 / 360.0, 1.0, 0.5, 1.0))
                 .text_color(hsla(0.0, 0.0, 0.969, 1.0))
                 .selection_color(hsla(250.0 / 360.0, 1.0, 0.5, 0.19))
+                .enter_mode(EnterMode::EnterNewline)
         });
 
         Self { textarea }
@@ -87,7 +88,7 @@ fn main() {
                 .ok();
         }
     });
-    
+
     app.run(move |cx: &mut App| {
         init(cx);
 
