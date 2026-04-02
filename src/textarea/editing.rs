@@ -107,8 +107,8 @@ impl TextInput {
         match self.mode {
             EnterMode::EnterSubmit => cx.emit(TextInputEvent::Submit),
             EnterMode::EnterNewline => {
-                self.replace_text_in_range(None, "\n", window, cx);
                 cx.emit(TextInputEvent::InsertNewline);
+                self.replace_text_in_range(None, "\n", window, cx);
             }
         }
     }
@@ -122,8 +122,8 @@ impl TextInput {
     ) {
         match self.mode {
             EnterMode::EnterSubmit => {
-                self.replace_text_in_range(None, "\n", window, cx);
                 cx.emit(TextInputEvent::InsertNewline);
+                self.replace_text_in_range(None, "\n", window, cx);
             }
             EnterMode::EnterNewline => cx.emit(TextInputEvent::Submit),
         }
