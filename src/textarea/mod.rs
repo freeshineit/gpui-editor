@@ -27,7 +27,7 @@
 //!         .placeholder("请输入内容...")
 //!         .max_length(500)
 //!         .max_height(px(300.0))
-//!         .enter_mode(EnterMode::EnterNewline)
+//!         .enter_mode(EnterMode::Enter)
 //! });
 //!
 //! // 3. 监听事件
@@ -94,7 +94,7 @@ actions!(
 ///         .placeholder("请输入...")
 ///         .max_length(200)
 ///         .max_height(px(300.0))
-///         .enter_mode(EnterMode::EnterNewline)
+///         .enter_mode(EnterMode::Enter)
 ///         .bg_color(hsla(0.0, 0.0, 0.137, 1.0))
 ///         .cursor_color(hsla(210.0/360.0, 1.0, 0.5, 1.0))
 ///         .text_color(hsla(0.0, 0.0, 0.969, 1.0))
@@ -153,11 +153,11 @@ pub struct TextInput {
 /// Enter 键模式。控制 Enter 和 Shift+Enter 的行为。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EnterMode {
-    /// Enter 提交，Shift+Enter 换行（默认）
+    /// Enter 插入换行，Shift+Enter 触发提交
+    Enter,
+    /// Enter 触发提交，Shift+Enter 插入换行（默认）
     #[default]
-    EnterSubmit,
-    /// Enter 换行，Shift+Enter 提交
-    EnterNewline,
+    ShiftEnter,
 }
 
 #[derive(Clone, Debug)]

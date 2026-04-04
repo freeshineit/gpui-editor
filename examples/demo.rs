@@ -23,7 +23,7 @@ impl DemoView {
                 .cursor_color(hsla(210.0 / 360.0, 1.0, 0.5, 1.0))
                 .text_color(hsla(0.0, 0.0, 0.969, 1.0))
                 .selection_color(hsla(250.0 / 360.0, 1.0, 0.5, 0.19))
-                .enter_mode(EnterMode::EnterNewline)
+                .enter_mode(EnterMode::Enter)
         });
 
         Self { textarea }

@@ -105,8 +105,8 @@ impl TextInput {
     /// 提交输入内容（由 Enter 键触发）。
     pub(crate) fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
-            EnterMode::EnterSubmit => cx.emit(TextInputEvent::Submit),
-            EnterMode::EnterNewline => {
+            EnterMode::ShiftEnter => cx.emit(TextInputEvent::Submit),
+            EnterMode::Enter => {
                 cx.emit(TextInputEvent::InsertNewline);
                 self.replace_text_in_range(None, "\n", window, cx);
             }
@@ -121,11 +121,11 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         match self.mode {
-            EnterMode::EnterSubmit => {
+            EnterMode::ShiftEnter => {
                 cx.emit(TextInputEvent::InsertNewline);
                 self.replace_text_in_range(None, "\n", window, cx);
             }
-            EnterMode::EnterNewline => cx.emit(TextInputEvent::Submit),
+            EnterMode::Enter => cx.emit(TextInputEvent::Submit),
         }
     }
 

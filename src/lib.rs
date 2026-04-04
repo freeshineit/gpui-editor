@@ -28,7 +28,7 @@
 ///         .placeholder("Type here...")
 ///         .max_length(500)
 ///         .max_height(px(300.0))
-///         .enter_mode(EnterMode::EnterNewline)
+///         .enter_mode(EnterMode::Enter)
 ///         .cursor_color(hsla(210.0/360.0, 1.0, 0.5, 1.0))
 /// });
 /// ```
