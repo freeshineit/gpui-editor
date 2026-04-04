@@ -148,6 +148,8 @@ pub struct TextInput {
     pub(crate) last_content_height: Option<Pixels>,
     /// Enter 键模式
     pub(crate) mode: EnterMode,
+    /// 可见文本行数，控制控件的最小高度。默认为 2。
+    pub(crate) rows: usize,
 }
 
 /// Enter 键模式。控制 Enter 和 Shift+Enter 的行为。
@@ -197,6 +199,7 @@ impl TextInput {
             scroll_offset: px(0.0),
             last_content_height: None,
             mode: EnterMode::default(),
+            rows: 2,
         };
         this.start_blink_task(cx);
         this
@@ -247,6 +250,12 @@ impl TextInput {
     /// 设置 Enter 键模式。
     pub fn enter_mode(mut self, mode: EnterMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// 设置可见文本行数，控制控件的最小高度。值必须为正整数，默认为 2。
+    pub fn rows(mut self, rows: usize) -> Self {
+        self.rows = rows.max(1);
         self
     }
 

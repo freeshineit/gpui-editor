@@ -394,8 +394,10 @@ impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 根据内容高度动态计算容器尺寸，受 max_height 限制
         let padding_y = px(8.0);
-        let min_height = px(20.0) + padding_y * 2.0;
-        let content_height = self.last_content_height.unwrap_or(px(20.0)) + padding_y * 2.0;
+        let line_h = px(20.0);
+        // 最小高度由 rows 决定
+        let min_height = line_h * self.rows as f32 + padding_y * 2.0;
+        let content_height = self.last_content_height.unwrap_or(line_h) + padding_y * 2.0;
         let container_height = content_height.max(min_height);
 
         let final_height = if let Some(max_h) = self.max_height {
