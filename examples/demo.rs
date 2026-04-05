@@ -54,7 +54,7 @@ impl Render for DemoView {
 }
 
 fn open_main_window(cx: &mut App) {
-    cx.open_window(
+    let window_handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
@@ -66,6 +66,16 @@ fn open_main_window(cx: &mut App) {
         |_window, cx| cx.new(|cx| DemoView::new(cx)),
     )
     .unwrap();
+
+    // 拦截窗口关闭：点击红色关闭按钮时隐藏应用，而非退出
+    window_handle
+        .update(cx, |_root, window, cx| {
+            window.on_window_should_close(cx, |_window, cx| {
+                cx.hide();
+                false // 阻止窗口真正关闭
+            });
+        })
+        .ok();
 }
 
 fn main() {
