@@ -10,6 +10,8 @@ gpui = "0.2.2"
 unicode-segmentation = "1.11"
 
 [dev-dependencies]
+log = "0.4"
+simplelog = "0.12"
 
 [[example]]
 name = "demo"

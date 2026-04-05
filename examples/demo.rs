@@ -1,6 +1,8 @@
 /// Demo application showcasing the gpui-editor textarea component.
 use gpui::*;
 use gpui_editor::textarea::{Copy, Cut, EnterMode, Paste, Quit, SelectAll, TextInput, Textarea, init, render_textarea};
+use log::{info, debug};
+use simplelog::{Config, LevelFilter, SimpleLogger};
 
 // Define menu actions
 actions!(
@@ -54,6 +56,7 @@ impl Render for DemoView {
 }
 
 fn open_main_window(cx: &mut App) {
+    info!("Opening main window");
     let window_handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -71,26 +74,35 @@ fn open_main_window(cx: &mut App) {
     window_handle
         .update(cx, |_root, window, cx| {
             window.on_window_should_close(cx, |_window, cx| {
+                info!("Window close intercepted, hiding app");
                 cx.hide();
                 false // 阻止窗口真正关闭
             });
         })
         .ok();
+    info!("Main window opened");
 }
 
 fn main() {
+    SimpleLogger::init(LevelFilter::Debug, Config::default()).unwrap();
+    info!("Starting gpui-editor demo");
+
     let app = Application::new();
 
     app.on_reopen(|cx| {
+        info!("App reopen triggered");
         if let Some(window) = cx.active_window() {
+            debug!("Activating existing active window");
             window
                 .update(cx, |_root, window, _cx| {
                     window.activate_window();
                 })
                 .ok();
         } else if cx.windows().is_empty() {
+            debug!("No windows found, creating new one");
             open_main_window(cx);
         } else if let Some(window) = cx.windows().first().copied() {
+            debug!("Activating first existing window");
             window
                 .update(cx, |_root, window, _cx| {
                     window.activate_window();
@@ -100,6 +112,7 @@ fn main() {
     });
 
     app.run(move |cx: &mut App| {
+        info!("App launched, initializing");
         init(cx);
 
         // Register global action handlers
@@ -107,15 +120,19 @@ fn main() {
             // About dialog handled by OS on macOS
         });
         cx.on_action(|_: &Hide, cx| {
+            debug!("Action: Hide");
             cx.hide();
         });
         cx.on_action(|_: &HideOthers, cx| {
+            debug!("Action: HideOthers");
             cx.hide_other_apps();
         });
         cx.on_action(|_: &ShowAll, cx| {
+            debug!("Action: ShowAll");
             cx.unhide_other_apps();
         });
         cx.on_action(|_: &Quit, cx| {
+            info!("Action: Quit");
             cx.quit();
         });
 
