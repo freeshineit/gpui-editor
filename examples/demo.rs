@@ -89,28 +89,6 @@ fn main() {
 
     let app = Application::new();
 
-    app.on_reopen(|cx| {
-        info!("App reopen triggered");
-        if let Some(window) = cx.active_window() {
-            debug!("Activating existing active window");
-            window
-                .update(cx, |_root, window, _cx| {
-                    window.activate_window();
-                })
-                .ok();
-        } else if cx.windows().is_empty() {
-            debug!("No windows found, creating new one");
-            open_main_window(cx);
-        } else if let Some(window) = cx.windows().first().copied() {
-            debug!("Activating first existing window");
-            window
-                .update(cx, |_root, window, _cx| {
-                    window.activate_window();
-                })
-                .ok();
-        }
-    });
-
     app.run(move |cx: &mut App| {
         info!("App launched, initializing");
         init(cx);
